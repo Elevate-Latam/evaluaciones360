@@ -736,10 +736,20 @@ function abrirCargaUsuarios(){
     `${BTN_CANCEL}<button class="btn btn-primary" onclick="procesarCargaUsuarios()">Procesar archivo</button>`));
 }
 function colv(r, nombres){ for(const k of Object.keys(r)){ if(nombres.includes(normTxt(k).replace(/[^a-z]/g,''))) return r[k]; } return ''; }
-function parseTabularFile(file, cb){
+/* Elige la hoja correcta del Excel: la plantilla trae «Instrucciones» como primera hoja, así que NO se puede leer la primera.
+   Prioridad: hoja con el nombre esperado; si no, la primera hoja cuyos encabezados incluyan las columnas esperadas; si no, la primera. */
+function elegirHoja(wb, hojaEsperada, colsEsperadas){
+  const nombres = wb.SheetNames, esp = normTxt(hojaEsperada||'').replace(/[^a-z]/g,'');
+  let n = nombres.find(x=>normTxt(x).replace(/[^a-z]/g,'')===esp);
+  if(!n && colsEsperadas){
+    n = nombres.find(x=>{ const f = XLSX.utils.sheet_to_json(wb.Sheets[x],{header:1,defval:'',range:0}); const enc = (f[0]||[]).map(c=>normTxt(c).replace(/[^a-z]/g,'')); return colsEsperadas.every(c=>enc.includes(c)); });
+  }
+  return n || nombres[0];
+}
+function parseTabularFile(file, cb, hoja, cols){
   const name = file.name.toLowerCase();
   if(name.endsWith('.csv')){ if(!window.Papa) return toast('La librería de CSV no cargó. Recarga la página.', true); Papa.parse(file,{header:true,skipEmptyLines:true,complete:res=>cb(res.data)}); }
-  else { if(!window.XLSX) return toast('La librería de Excel no cargó. Recarga la página.', true); const rd=new FileReader(); rd.onload=e=>{ const wb=XLSX.read(e.target.result,{type:'array'}); cb(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:''})); }; rd.readAsArrayBuffer(file); }
+  else { if(!window.XLSX) return toast('La librería de Excel no cargó. Recarga la página.', true); const rd=new FileReader(); rd.onload=e=>{ const wb=XLSX.read(e.target.result,{type:'array'}); cb(XLSX.utils.sheet_to_json(wb.Sheets[elegirHoja(wb,hoja,cols)],{defval:''})); }; rd.readAsArrayBuffer(file); }
 }
 function resumenModal(titulo, lineas){ abrirModal(modalHtml(titulo, lineas.map(l=>`<p>${l}</p>`).join(''), `<button class="btn btn-primary" onclick="closeModal()">Cerrar</button>`)); }
 function procesarCargaUsuarios(){
@@ -748,7 +758,7 @@ function procesarCargaUsuarios(){
     const filas = rows.map(r=>({nombre:colv(r,['nombre','name']), email:colv(r,['email','correo','correoelectronico']), rol:colv(r,['rol','cargo','puesto']), jefeNombre:colv(r,['jefenombre','nombrejefe','jefe']), jefeEmail:colv(r,['jefeemail','emailjefe','correojefe']), puedeSerResponsable:/^(si|sí|s|x|1|true)$/i.test(String(colv(r,['responsable','puedeserresponsable'])).trim()) }));
     const r = await accion('crearUsuariosMasivo',{clienteId:STATE.clienteId, filas}, null, {cerrarModal:false, sinRender:true}); if(!r) return;
     resumenModal('Resultado de la carga', [`<strong>${r.creados}</strong> creados · <strong>${r.duplicados}</strong> ya existían · <strong>${r.archivadosExistentes}</strong> existen archivados (restáuralos) · <strong>${r.invalidos}</strong> filas inválidas.`, `Jefes vinculados: <strong>${r.jefesVinculados||0}</strong>${r.jefesSinResolver?` · <strong>${r.jefesSinResolver}</strong> con un jefe que todavía no existe en la lista (créalo y se vinculará solo, o elígelo desde la ficha del usuario)`:''}.`].concat((r.errores||[]).map(e=>`<span class="mini">${esc(e)}</span>`)));
-  });
+  }, 'Usuarios', ['nombre','email']);
 }
 
 /* ================= PROYECTOS ================= */
@@ -977,13 +987,19 @@ function abrirCargaAsignaciones(){
     <div class="field"><input type="file" id="up-file" accept=".csv,.xls,.xlsx"/></div>`,
     `${BTN_CANCEL}<button class="btn btn-primary" onclick="procesarCargaAsignaciones()">Procesar archivo</button>`));
 }
+/* Tolera tildes, mayúsculas y sinónimos comunes en la columna relacion (p. ej. «Autoevaluación», «Jefe directo», «Reporte directo»). */
+function relacionNorm(v){
+  const x = normTxt(v).trim().replace(/\s+/g,' ');
+  const m = {'autoevaluacion':'autoevaluacion','auto evaluacion':'autoevaluacion','jefe':'jefe','jefe directo':'jefe','jefatura':'jefe','par':'par','pares':'par','colega':'par','companero':'par','subordinado':'subordinado','subordinados':'subordinado','reporte':'subordinado','reporte directo':'subordinado','reportes directos':'subordinado','cliente':'cliente','cliente externo':'cliente'};
+  return m[x] || x;
+}
 function procesarCargaAsignaciones(){
   const f=$('up-file')&&$('up-file').files[0]; if(!f) return toast('Selecciona un archivo primero.', true);
   parseTabularFile(f, async rows=>{
-    const filas = rows.map(r=>({emailEvaluado:colv(r,['emailevaluado','correoevaluado','evaluadoemail']), emailEvaluador:colv(r,['emailevaluador','correoevaluador','evaluadoremail']), relacion:colv(r,['relacion','relación','grupo'])}));
+    const filas = rows.map(r=>({emailEvaluado:colv(r,['emailevaluado','correoevaluado','evaluadoemail']), emailEvaluador:colv(r,['emailevaluador','correoevaluador','evaluadoremail']), relacion:relacionNorm(colv(r,['relacion','relación','grupo']))}));
     const r = await accion('crearAsignacionesMasivo',{proyectoId:STATE.proyectoId, filas}, null, {cerrarModal:false, sinRender:true}); if(!r) return;
     resumenModal('Resultado de la carga', [`<strong>${r.creadas}</strong> asignaciones creadas${r.autoCreadas?` (+ <strong>${r.autoCreadas}</strong> ${r.autoCreadas===1?'autoevaluación creada':'autoevaluaciones creadas'} automáticamente)`:''} · <strong>${r.errores}</strong> con error${r.correosFallidos?` · <strong>${r.correosFallidos}</strong> correos no salieron (revisa la cuota o la dirección del sitio)`:''}.`].concat((r.detalle||[]).map(e=>`<span class="mini">${esc(e)}</span>`)));
-  });
+  }, 'Asignaciones', ['emailevaluado','emailevaluador','relacion']);
 }
 
 /* ===== búsqueda inteligente (sin distinguir tildes, varias palabras, sinónimos) ===== */
